@@ -1,0 +1,18 @@
+{
+  "name": "nuclear-headphone-bridge",
+  "version": "1.0.0",
+  "description": "Translates headphone button presses to Like/Favorite actions in Nuclear Music Player",
+  "author": "Bhavya Kumar <bhavyakumar6840@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bhavyakumar-dev/headphone-taps.git"
+  },
+  "license": "MIT",
+  "main": "index.js",
+  "nuclear": {
+    "displayName": "Headphone Like Bridge",
+    "categories": [
+      "other"
+    ]
+  }
+}
