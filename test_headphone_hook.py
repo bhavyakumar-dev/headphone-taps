@@ -6,6 +6,13 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from app.config import config
 from app.headphone_listener import HeadphoneListener
 from app.nuclear_bridge import NuclearBridge
@@ -52,7 +59,11 @@ def main():
         action_desc = event.get("action_desc", "")
 
         status_flag = f" -> {action_desc}" if action_desc else (" [MATCHED TRIGGER -> LIKE!]" if triggered else "")
-        print(f"[{now_str}] 🎧 Key: {key} ({vk}) | Tap Count: {count}{status_flag}")
+        try:
+            print(f"[{now_str}] 🎧 Key: {key} ({vk}) | Tap Count: {count}{status_flag}")
+        except UnicodeEncodeError:
+            clean_status = status_flag.encode("ascii", errors="replace").decode("ascii")
+            print(f"[{now_str}] [Key] {key} ({vk}) | Tap Count: {count}{clean_status}")
 
     listener = HeadphoneListener(
         config,

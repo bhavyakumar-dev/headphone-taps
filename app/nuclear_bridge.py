@@ -272,8 +272,11 @@ class NuclearBridge:
 
         try:
             import ctypes
+            import ctypes.wintypes as wintypes
             SYNTHETIC_EXTRA_INFO = 0xDEADC0DE
             user32 = ctypes.windll.user32
+            user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_ulonglong]
+            user32.keybd_event.restype = None
             user32.keybd_event(0xB1, 0, 0, SYNTHETIC_EXTRA_INFO)
             user32.keybd_event(0xB1, 0, 2, SYNTHETIC_EXTRA_INFO)
             return True

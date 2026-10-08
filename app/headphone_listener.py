@@ -1,7 +1,20 @@
 import ctypes
 import ctypes.wintypes as wintypes
 import time
+import sys
 import threading
+
+def _safe_print(msg):
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        try:
+            encoding = sys.stdout.encoding or "utf-8"
+            print(msg.encode(encoding, errors="replace").decode(encoding))
+        except Exception:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
+    except Exception:
+        pass
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -34,6 +47,37 @@ KEY_NAMES = {
 
 LRESULT = ctypes.c_int64
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+# Explicit 64-bit Win32 API signatures to prevent 32-bit c_int truncation and OverflowError
+user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+user32.CallNextHookEx.restype = LRESULT
+
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+user32.SetWindowsHookExW.restype = wintypes.HHOOK
+
+user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+
+user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+user32.GetMessageW.restype = wintypes.BOOL
+
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.TranslateMessage.restype = wintypes.BOOL
+
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageW.restype = LRESULT
+
+user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.PostThreadMessageW.restype = wintypes.BOOL
+
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+kernel32.GetLastError.argtypes = []
+kernel32.GetLastError.restype = wintypes.DWORD
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
     _fields_ = [
@@ -69,6 +113,9 @@ class HeadphoneListener:
         self._prev_click_time = 0.0
 
     def _hook_callback(self, nCode, wParam, lParam):
+        if not lParam:
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
         if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
             try:
                 kbd = KBDLLHOOKSTRUCT.from_address(lParam)
@@ -85,7 +132,7 @@ class HeadphoneListener:
                     if suppress and self.config.get("suppress_original_key", True):
                         return 1  # Swallow key event
             except Exception as e:
-                print(f"[HeadphoneListener] Hook callback error: {e}")
+                _safe_print(f"[HeadphoneListener] Hook callback error: {e}")
 
         return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
@@ -95,7 +142,7 @@ class HeadphoneListener:
             self._pending_prev_timer = None
             self._prev_click_time = 0.0
 
-        print("[HeadphoneListener] WH-CH720N: 3 Clicks confirmed -> Previous Track / Replay")
+        _safe_print("[HeadphoneListener] WH-CH720N: 3 Clicks confirmed -> Previous Track / Replay")
         if self.on_key_event:
             self.on_key_event({
                 "vk_code": VK_MEDIA_PREV_TRACK,
@@ -220,7 +267,7 @@ class HeadphoneListener:
             })
 
         if should_trigger_like:
-            print(f"[HeadphoneListener] {action_desc}")
+            _safe_print(f"[HeadphoneListener] {action_desc}")
             if self.on_trigger_like:
                 threading.Thread(target=self.on_trigger_like, daemon=True).start()
 
@@ -236,17 +283,15 @@ class HeadphoneListener:
             self.hook_thread_id = kernel32.GetCurrentThreadId()
             self._hook_proc_ref = HOOKPROC(self._hook_callback)
             
-            user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
-            user32.SetWindowsHookExW.restype = wintypes.HHOOK
-            
-            self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc_ref, None, 0)
+            h_mod = kernel32.GetModuleHandleW(None)
+            self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hook_proc_ref, h_mod, 0)
             if not self.hook:
-                err = ctypes.get_last_error()
-                print(f"[HeadphoneListener] Failed to set hook! Error: {err}")
+                err = kernel32.GetLastError()
+                _safe_print(f"[HeadphoneListener] Failed to set hook! Error: {err}")
                 ready_event.set()
                 return
 
-            print(f"[HeadphoneListener] Low-level hook installed successfully (Thread ID {self.hook_thread_id})")
+            _safe_print(f"[HeadphoneListener] Low-level hook installed successfully (Thread ID {self.hook_thread_id})")
             ready_event.set()
 
             # Win32 Message Loop
@@ -258,7 +303,7 @@ class HeadphoneListener:
             if self.hook:
                 user32.UnhookWindowsHookEx(self.hook)
                 self.hook = None
-            print("[HeadphoneListener] Hook uninstalled cleanly")
+            _safe_print("[HeadphoneListener] Hook uninstalled cleanly")
 
         self.hook_thread = threading.Thread(target=_thread_target, daemon=True)
         self.hook_thread.start()
