@@ -8,6 +8,17 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+_user32 = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        import ctypes.wintypes as wintypes
+        _user32 = ctypes.windll.user32
+        _user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_ulonglong]
+        _user32.keybd_event.restype = None
+    except Exception:
+        pass
+
 class NuclearBridge:
     def __init__(self, config):
         self.config = config
@@ -271,15 +282,12 @@ class NuclearBridge:
             return True
 
         try:
-            import ctypes
-            import ctypes.wintypes as wintypes
             SYNTHETIC_EXTRA_INFO = 0xDEADC0DE
-            user32 = ctypes.windll.user32
-            user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_ulonglong]
-            user32.keybd_event.restype = None
-            user32.keybd_event(0xB1, 0, 0, SYNTHETIC_EXTRA_INFO)
-            user32.keybd_event(0xB1, 0, 2, SYNTHETIC_EXTRA_INFO)
-            return True
+            if _user32:
+                _user32.keybd_event(0xB1, 0, 0, SYNTHETIC_EXTRA_INFO)
+                _user32.keybd_event(0xB1, 0, 2, SYNTHETIC_EXTRA_INFO)
+                return True
+            return False
         except Exception as e:
             print(f"[NuclearBridge] Error synthesizing previous key: {e}")
             return False

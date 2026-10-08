@@ -4,15 +4,28 @@ import time
 import sys
 import threading
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 def _safe_print(msg):
     try:
         print(msg)
     except UnicodeEncodeError:
         try:
-            encoding = sys.stdout.encoding or "utf-8"
-            print(msg.encode(encoding, errors="replace").decode(encoding))
+            clean_msg = msg.replace("❤️", "[LIKE]").replace("🎧", "[HEADPHONES]")
+            encoding = sys.stdout.encoding or "ascii"
+            print(clean_msg.encode(encoding, errors="replace").decode(encoding))
         except Exception:
-            print(msg.encode("ascii", errors="replace").decode("ascii"))
+            try:
+                print(msg.encode("ascii", errors="replace").decode("ascii"))
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -113,32 +126,38 @@ class HeadphoneListener:
         self._prev_click_time = 0.0
 
     def _hook_callback(self, nCode, wParam, lParam):
-        if not lParam:
+        try:
+            if not lParam:
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                try:
+                    kbd = KBDLLHOOKSTRUCT.from_address(lParam)
+                    
+                    # If this is our own synthetic replay, let it pass straight through
+                    if kbd.dwExtraInfo == EXTRA_INFO_SYNTHETIC:
+                        return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+                    vk_code = kbd.vkCode
+                    
+                    # Check if it's a media key
+                    if vk_code in KEY_NAMES:
+                        suppress = self._handle_media_key(vk_code)
+                        if suppress and self.config.get("suppress_original_key", True):
+                            return 1  # Swallow key event
+                except Exception as e:
+                    _safe_print(f"[HeadphoneListener] Hook callback error: {e}")
+
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
-
-        if nCode >= 0 and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            try:
-                kbd = KBDLLHOOKSTRUCT.from_address(lParam)
-                
-                # If this is our own synthetic replay, let it pass straight through
-                if kbd.dwExtraInfo == EXTRA_INFO_SYNTHETIC:
-                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
-
-                vk_code = kbd.vkCode
-                
-                # Check if it's a media key
-                if vk_code in KEY_NAMES:
-                    suppress = self._handle_media_key(vk_code)
-                    if suppress and self.config.get("suppress_original_key", True):
-                        return 1  # Swallow key event
-            except Exception as e:
-                _safe_print(f"[HeadphoneListener] Hook callback error: {e}")
-
-        return user32.CallNextHookEx(None, nCode, wParam, lParam)
+        except Exception as e:
+            _safe_print(f"[HeadphoneListener] Hook callback critical error: {e}")
+            return 0
 
     def _on_prev_timeout(self):
         """Called when 3 clicks occurred on WH-CH720N and no 4th click followed"""
         with self._lock:
+            if self._pending_prev_timer is None and self._prev_click_time == 0.0:
+                return  # 4th click was already confirmed or timer cancelled
             self._pending_prev_timer = None
             self._prev_click_time = 0.0
 
@@ -188,25 +207,30 @@ class HeadphoneListener:
                     if self._pending_prev_timer:
                         self._pending_prev_timer.cancel()
                     self._prev_click_time = now
-                    # Delay 420ms to see if a 4th click arrives
-                    self._pending_prev_timer = threading.Timer(0.42, self._on_prev_timeout)
+                    # Scale delay based on configured timeout (default ~420ms for 650ms timeout)
+                    prev_delay = max(0.25, min(0.55, timeout * 0.65))
+                    self._pending_prev_timer = threading.Timer(prev_delay, self._on_prev_timeout)
                     self._pending_prev_timer.start()
 
-                suppress_key = True  # Hold back event until 420ms timer decides
+                suppress_key = True  # Hold back event until timer decides
                 action_desc = "3 Clicks detected -> Waiting for 4th click..."
 
             elif vk_code == VK_MEDIA_PLAY_PAUSE:
-                time_since_prev = now - self._prev_click_time
-                is_4th_click = (self._pending_prev_timer is not None or time_since_prev < 0.65) or (current_count == 4)
+                with self._lock:
+                    time_since_prev = now - self._prev_click_time
+                    is_4th_click = (
+                        (self._pending_prev_timer is not None or (self._prev_click_time > 0 and time_since_prev < timeout))
+                        or (current_count == 4)
+                    )
 
-                if is_4th_click:
-                    # 4TH CLICK CONFIRMED!
-                    with self._lock:
+                    if is_4th_click:
+                        # 4TH CLICK CONFIRMED!
                         if self._pending_prev_timer:
                             self._pending_prev_timer.cancel()
                             self._pending_prev_timer = None
                         self._prev_click_time = 0.0
 
+                if is_4th_click:
                     should_trigger_like = True
                     suppress_key = True
                     action_desc = "❤️ 4 Clicks (WH-CH720N) -> LIKED CURRENT SONG!"
@@ -294,16 +318,17 @@ class HeadphoneListener:
             _safe_print(f"[HeadphoneListener] Low-level hook installed successfully (Thread ID {self.hook_thread_id})")
             ready_event.set()
 
-            # Win32 Message Loop
-            msg = wintypes.MSG()
-            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
-
-            if self.hook:
-                user32.UnhookWindowsHookEx(self.hook)
-                self.hook = None
-            _safe_print("[HeadphoneListener] Hook uninstalled cleanly")
+            try:
+                # Win32 Message Loop
+                msg = wintypes.MSG()
+                while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+            finally:
+                if self.hook:
+                    user32.UnhookWindowsHookEx(self.hook)
+                    self.hook = None
+                _safe_print("[HeadphoneListener] Hook uninstalled cleanly")
 
         self.hook_thread = threading.Thread(target=_thread_target, daemon=True)
         self.hook_thread.start()
@@ -319,3 +344,13 @@ class HeadphoneListener:
             user32.PostThreadMessageW(self.hook_thread_id, WM_QUIT, 0, 0)
         if self.hook_thread and self.hook_thread.is_alive():
             self.hook_thread.join(timeout=1.0)
+
+        with self._lock:
+            if self.hook:
+                try:
+                    user32.UnhookWindowsHookEx(self.hook)
+                except Exception:
+                    pass
+                self.hook = None
+            self.hook_thread_id = None
+            self._hook_proc_ref = None

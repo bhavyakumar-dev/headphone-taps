@@ -279,6 +279,102 @@ class TestHeadphoneListener64Bit(unittest.TestCase):
                 on_like.assert_called()
                 listener.stop()
 
+    def test_hookproc_c_callback_invocation_64bit(self):
+        """Verify invoking the actual C-level HOOKPROC function pointer accepts 64-bit lParam without error."""
+        listener = HeadphoneListener(config)
+        proc = HOOKPROC(listener._hook_callback)
+
+        kbd = KBDLLHOOKSTRUCT(
+            vkCode=0x41,  # 'A'
+            scanCode=0x1E,
+            flags=0,
+            time=1000,
+            dwExtraInfo=0
+        )
+        valid_addr = ctypes.addressof(kbd)
+
+        test_addresses = [
+            valid_addr,
+            0x000001BE0B9FBCD0,
+            0x00007FF666F20000,
+            0x7FFFFFFFFFFFFFFF,
+            0xFFFFFFFFFFFFFFFF,
+            0,
+        ]
+
+        for addr in test_addresses:
+            with self.subTest(addr=hex(addr)):
+                try:
+                    # Negative nCode guarantees safe bypass of memory dereferencing
+                    res = proc(-1, WM_KEYDOWN, addr)
+                    self.assertIsInstance(res, int)
+                except Exception as e:
+                    self.fail(f"HOOKPROC failed for address {hex(addr)}: {e}")
+
+    def test_hook_callback_syskeydown_handled(self):
+        """Verify WM_SYSKEYDOWN is processed as a valid keypress event."""
+        on_like = MagicMock()
+        listener = HeadphoneListener(
+            {"trigger_mode": "triple_click_prev", "suppress_original_key": True, "multi_tap_timeout_ms": 650},
+            on_trigger_like=on_like
+        )
+        kbd = KBDLLHOOKSTRUCT(vkCode=VK_MEDIA_PREV_TRACK, scanCode=0, flags=0, time=100, dwExtraInfo=0)
+        lParam = ctypes.addressof(kbd)
+
+        res = listener._hook_callback(0, WM_SYSKEYDOWN, lParam)
+        self.assertEqual(res, 1)
+        time.sleep(0.05)
+        on_like.assert_called_once()
+        listener.stop()
+
+    def test_wh720n_timer_cancellation_race_condition(self):
+        """Verify that when 4th click arrives right around timer expiration, prev is cancelled and only like fires."""
+        on_like = MagicMock()
+        on_prev = MagicMock()
+        listener = HeadphoneListener(
+            {"trigger_mode": "four_clicks_wh720n", "suppress_original_key": True, "multi_tap_timeout_ms": 650},
+            on_trigger_like=on_like,
+            on_trigger_previous=on_prev
+        )
+
+        kbd_prev = KBDLLHOOKSTRUCT(vkCode=VK_MEDIA_PREV_TRACK, scanCode=0, flags=0, time=100, dwExtraInfo=0)
+        kbd_play = KBDLLHOOKSTRUCT(vkCode=VK_MEDIA_PLAY_PAUSE, scanCode=0, flags=0, time=200, dwExtraInfo=0)
+
+        # Trigger 3rd click (starts pending timer)
+        listener._hook_callback(0, WM_KEYDOWN, ctypes.addressof(kbd_prev))
+
+        # Deliver 4th click within the window
+        time.sleep(0.1)
+        listener._hook_callback(0, WM_KEYDOWN, ctypes.addressof(kbd_play))
+
+        # Wait past the full timer duration to verify timer callback does NOT fire on_prev
+        time.sleep(0.5)
+
+        on_like.assert_called_once()
+        on_prev.assert_not_called()
+        listener.stop()
+
+    def test_listener_multiple_start_stop_cycles(self):
+        """Verify listener can be started, stopped, and restarted cleanly without leaks or hanging threads."""
+        listener = HeadphoneListener(config)
+        for i in range(3):
+            listener.start()
+            self.assertIsNotNone(listener.hook, f"Cycle {i}: hook should be installed")
+            self.assertTrue(listener.hook_thread.is_alive(), f"Cycle {i}: thread should be alive")
+            listener.stop()
+            time.sleep(0.05)
+            self.assertIsNone(listener.hook, f"Cycle {i}: hook should be uninstalled")
+
+    def test_hook_callback_exception_shielding(self):
+        """Verify _hook_callback shields from unhandled Python exceptions during media key handling."""
+        listener = HeadphoneListener(config)
+        listener._handle_media_key = MagicMock(side_effect=RuntimeError("Simulated unexpected error"))
+
+        kbd = KBDLLHOOKSTRUCT(vkCode=VK_MEDIA_PLAY_PAUSE, scanCode=0, flags=0, time=100, dwExtraInfo=0)
+        # Should gracefully catch the exception, print warning, and return CallNextHookEx result (0)
+        res = listener._hook_callback(0, WM_KEYDOWN, ctypes.addressof(kbd))
+        self.assertEqual(res, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
